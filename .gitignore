@@ -1,0 +1,31 @@
+# Environnement virtuel
+venv/
+.venv/
+env/
+bin/
+lib/
+share/
+
+# Variables d'environnement
+.env
+
+# Fichiers temporaires Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Base de données locale 
+*.db
+*.sqlite3
+
+# Dossiers d'IDE
+.vscode/
+.idea/
+
+# OS spécifiques
+.DS_Store
+Thumbs.db
+
+# Anciens dossiers de médias
+media/
