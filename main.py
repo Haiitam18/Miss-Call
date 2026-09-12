@@ -92,6 +92,7 @@ async def process_ai_logic(from_number: str, body: str, conv_id: int):
         # Décision : Envoyer le dossier ou continuer la discussion
         if _is_complete(conv.data) and not conv.data.get("_dossier_envoye"):
             conv.data["_dossier_envoye"] = True
+            flag_modified(conv, "data")
             await session.commit()
             
             summary = format_summary_for_artisan(conv.data, customer_phone=from_number)
