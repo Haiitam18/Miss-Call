@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import os
@@ -65,44 +66,56 @@ async def _store_message(session: AsyncSession, **kwargs) -> None:
 
 # --- LOGIQUE IA ---
 
+_conversation_locks: Dict[int, asyncio.Lock] = {}
+
 async def process_ai_logic(from_number: str, body: str, conv_id: int):
-    async for session in get_db():
-        stmt = select(Conversation).options(selectinload(Conversation.artisan)).where(Conversation.id == conv_id)
-        conv = (await session.execute(stmt)).scalars().first()
-        if not conv or conv.status == ConversationStatus.TERMINE: return
+    lock = _conversation_locks.setdefault(conv_id, asyncio.Lock())
+    async with lock:
+        async for session in get_db():
+            try:
+                stmt = select(Conversation).options(selectinload(Conversation.artisan)).where(Conversation.id == conv_id)
+                conv = (await session.execute(stmt)).scalars().first()
+                if not conv or conv.status == ConversationStatus.TERMINE: return
 
-        artisan = conv.artisan
-        wrapper = OpenAIWrapper(api_key=os.getenv("OPENAI_API_KEY"), model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+                artisan = conv.artisan
+                wrapper = OpenAIWrapper(api_key=os.getenv("OPENAI_API_KEY"), model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 
-        # Extraction des données
-        new_extracted = await wrapper.chat_completion_json([
-            {"role": "system", "content": SYSTEM_PROMPT_EXTRACT.format(nom_societe=artisan.nom_societe)},
-            {"role": "user", "content": f"Contexte: {json.dumps(conv.data)}\nMessage: {body}"}
-        ])
-        
-        # Fusion des données
-        new_data = json.loads(new_extracted) if isinstance(new_extracted, str) else new_extracted
-        if new_data:
-            for key, item in new_data.items():
-                if not isinstance(item, dict): item = {"value": item, "confidence": 1.0}
-                if item.get("value"): conv.data[key] = item
-            flag_modified(conv, "data")
-            await session.commit()
+                # Extraction des données
+                new_extracted = await wrapper.chat_completion_json([
+                    {"role": "system", "content": SYSTEM_PROMPT_EXTRACT.format(nom_societe=artisan.nom_societe)},
+                    {"role": "user", "content": f"Contexte: {json.dumps(conv.data)}\nMessage: {body}"}
+                ])
+                
+                # Fusion des données
+                new_data = json.loads(new_extracted) if isinstance(new_extracted, str) else new_extracted
+                if new_data:
+                    for key, item in new_data.items():
+                        if not isinstance(item, dict): item = {"value": item, "confidence": 1.0}
+                        if item.get("value"): conv.data[key] = item
+                    flag_modified(conv, "data")
+                    await session.commit()
 
-        # Décision : Envoyer le dossier ou continuer la discussion
-        if _is_complete(conv.data) and not conv.data.get("_dossier_envoye"):
-            conv.data["_dossier_envoye"] = True
-            await session.commit()
-            
-            summary = format_summary_for_artisan(conv.data, customer_phone=from_number)
-            await send_sms(artisan.notification_phone_number, f"📢 NOUVEAU DOSSIER ({artisan.nom_societe}) :\n\n{summary}")
-            await send_sms(from_number, f"Merci ! ✅ Votre demande est transmise à {artisan.nom_societe}.")
-        else:
-            resp = await wrapper.chat_completion([{"role": "system", "content": SYSTEM_PROMPT_NEXT_QUESTION.format(
-                nom_societe=artisan.nom_societe, data_json=json.dumps(conv.data), last_message=body
-            )}])
-            await _store_message(session, conversation_id=conv.id, role=MessageRole.ASSISTANT, content=resp)
-            await send_sms(from_number, resp)
+                # Décision : Envoyer le dossier ou continuer la discussion
+                if _is_complete(conv.data) and not conv.data.get("_dossier_envoye"):
+                    conv.data["_dossier_envoye"] = True
+                    flag_modified(conv, "data")
+                    await session.commit()
+                    
+                    summary = format_summary_for_artisan(conv.data, customer_phone=from_number)
+                    await send_sms(artisan.notification_phone_number, f"📢 NOUVEAU DOSSIER ({artisan.nom_societe}) :\n\n{summary}")
+                    await send_sms(from_number, f"Merci ! ✅ Votre demande est transmise à {artisan.nom_societe}.")
+                else:
+                    resp = await wrapper.chat_completion([{"role": "system", "content": SYSTEM_PROMPT_NEXT_QUESTION.format(
+                        nom_societe=artisan.nom_societe, data_json=json.dumps(conv.data), last_message=body
+                    )}])
+                    await _store_message(session, conversation_id=conv.id, role=MessageRole.ASSISTANT, content=resp)
+                    await send_sms(from_number, resp)
+            except Exception:
+                logger.exception("Erreur dans process_ai_logic pour %s (conv_id=%s)", from_number, conv_id)
+                try:
+                    await send_sms(from_number, "Un instant, votre demande est bien prise en compte, nous revenons vers vous.")
+                except Exception:
+                    pass
 
 # --- WEBHOOKS ---
 
