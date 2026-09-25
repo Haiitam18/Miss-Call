@@ -72,6 +72,7 @@ async def process_ai_logic(from_number: str, body: str, conv_id: int):
     lock = _conversation_locks.setdefault(conv_id, asyncio.Lock())
     async with lock:
         async for session in get_db():
+            artisan = None
             try:
                 stmt = select(Conversation).options(selectinload(Conversation.artisan)).where(Conversation.id == conv_id)
                 conv = (await session.execute(stmt)).scalars().first()
@@ -102,18 +103,22 @@ async def process_ai_logic(from_number: str, body: str, conv_id: int):
                     await session.commit()
                     
                     summary = format_summary_for_artisan(conv.data, customer_phone=from_number)
-                    await send_sms(artisan.notification_phone_number, f"📢 NOUVEAU DOSSIER ({artisan.nom_societe}) :\n\n{summary}")
-                    await send_sms(from_number, f"Merci ! ✅ Votre demande est transmise à {artisan.nom_societe}.")
+                    await send_sms(artisan.notification_phone_number, f"📢 NOUVEAU DOSSIER ({artisan.nom_societe}) :\n\n{summary}", from_number=artisan.twilio_phone_number)
+                    await send_sms(from_number, f"Merci ! ✅ Votre demande est transmise à {artisan.nom_societe}.", from_number=artisan.twilio_phone_number)
                 else:
                     resp = await wrapper.chat_completion([{"role": "system", "content": SYSTEM_PROMPT_NEXT_QUESTION.format(
                         nom_societe=artisan.nom_societe, data_json=json.dumps(conv.data), last_message=body
                     )}])
                     await _store_message(session, conversation_id=conv.id, role=MessageRole.ASSISTANT, content=resp)
-                    await send_sms(from_number, resp)
+                    await send_sms(from_number, resp, from_number=artisan.twilio_phone_number)
             except Exception:
                 logger.exception("Erreur dans process_ai_logic pour %s (conv_id=%s)", from_number, conv_id)
                 try:
-                    await send_sms(from_number, "Un instant, votre demande est bien prise en compte, nous revenons vers vous.")
+                    await send_sms(
+                        from_number,
+                        "Un instant, votre demande est bien prise en compte, nous revenons vers vous.",
+                        from_number=artisan.twilio_phone_number if artisan else None,
+                    )
                 except Exception:
                     pass
 
@@ -135,7 +140,7 @@ async def webhook_messages(request: Request, background: BackgroundTasks, sessio
     if not (await session.execute(select(Message).where(Message.conversation_id == conv.id, Message.role == MessageRole.ASSISTANT))).first():
         welcome = f"Bonjour, ici l'assistant de {artisan.nom_societe} 👋. L'artisan est en intervention. Pour organiser le rappel, précisez-moi : problème, ville, et urgence."
         await _store_message(session, conversation_id=conv.id, role=MessageRole.ASSISTANT, content=welcome)
-        await send_sms(from_number, welcome)
+        await send_sms(from_number, welcome, from_number=artisan.twilio_phone_number)
         return ""
 
     background.add_task(process_ai_logic, from_number, body, conv.id)
@@ -152,7 +157,7 @@ async def webhook_voice(request: Request, session: AsyncSession = Depends(get_db
         if not (await session.execute(select(Message).where(Message.conversation_id == conv.id, Message.role == MessageRole.ASSISTANT))).first():
             welcome = f"Bonjour, ici l'assistant de {artisan.nom_societe} 👋. Précisez-moi votre problème, votre ville et si c'est une urgence pour organiser votre rappel."
             await _store_message(session, conversation_id=conv.id, role=MessageRole.ASSISTANT, content=welcome)
-            await send_sms(from_number, welcome)
+            await send_sms(from_number, welcome, from_number=artisan.twilio_phone_number)
 
     response = VoiceResponse()
     response.reject(reason='busy')

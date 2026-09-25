@@ -19,13 +19,14 @@ def _get_twilio_credentials() -> tuple[str, str, str]:
         raise RuntimeError("Variables Twilio manquantes dans le .env")
     return account_sid, auth_token, from_number
 
-async def send_sms(to: str, body: str) -> str:
+async def send_sms(to: str, body: str, from_number: str | None = None) -> str:
     """Envoie un SMS via Twilio. Remplace 'whatsapp:' si présent par précaution."""
-    account_sid, auth_token, from_number = _get_twilio_credentials()
+    account_sid, auth_token, default_from = _get_twilio_credentials()
+    sender = from_number if from_number else default_from
     
     # Nettoyage systématique des préfixes
     clean_to = to.replace("whatsapp:", "").strip()
-    clean_from = from_number.replace("whatsapp:", "").strip()
+    clean_from = sender.replace("whatsapp:", "").strip()
 
     def _send_sync() -> str:
         client = Client(account_sid, auth_token)
